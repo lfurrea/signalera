@@ -1,12 +1,12 @@
 %%%-------------------------------------------------------------------
-%%% @author Luis F Urrea <lfurrea@mindcoder.simplecs.sa>
+%%% @author Luis F Urrea <lfurrea@simplecs.net>
 %%% @copyright (C) 2012, Luis F Urrea
 %%% @doc
 %%%
 %%% @end
-%%% Created :  6 Nov 2012 by Luis F Urrea <lfurrea@mindcoder.simplecs.sa>
+%%% Created :  6 Nov 2012 by Luis F Urrea <lfurrea@simplecs.net>
 %%%-------------------------------------------------------------------
--module(fs_outbound_sup).
+-module(simpleswitch_sup).
 
 -behaviour(supervisor).
 
@@ -17,6 +17,16 @@
 -export([init/1]).
 
 -define(SERVER, ?MODULE).
+
+-type startlink_err() :: {'already_started', pid()} | 'shutdown' | term().
+-type startlink_ret() :: {'ok', pid()} | ignore | {'error', startlink_err()}.
+-type sup_child_spec() :: supervisor:child_spec().
+-type sup_child_specs() :: [sup_child_spec()] | [].
+-type sup_start_flags() :: {supervisor:strategy(), non_neg_integer(), non_neg_integer()}.
+-type sup_init_ret() :: ignore | {'ok', {sup_start_flags(), sup_child_specs()}}.
+
+-spec init(Args) -> sup_init_ret() when
+      Args :: [].
 
 %%%===================================================================
 %%% API functions
@@ -29,6 +39,9 @@
 %% @spec start_link() -> {ok, Pid} | ignore | {error, Error}
 %% @end
 %%--------------------------------------------------------------------
+
+-spec start_link() -> startlink_ret().
+
 start_link() ->
     supervisor:start_link({local, ?SERVER}, ?MODULE, []).
 
@@ -49,12 +62,17 @@ start_link() ->
 %%                     {error, Reason}
 %% @end
 %%--------------------------------------------------------------------
+
+
+
 init([]) ->
-    FsWorker = {outbound_controller, {fs_outbound_controller, start_link, []},
-	       permanent, 2000, worker, [fs_outbound_controller]},
-    ExtnSup = {outbound_extn_sup, {fs_outbound_extn_sup, start_link, []}, 
-	      permanent, 2000, supervisor, [fs_outbound_extn_sup]},
-    Children = [FsWorker, ExtnSup],
+    FsWorker = {simpleswitch_core, {simpleswitch_core, start_link, []},
+	       permanent, 2000, worker, [simpleswitch_core]},
+    AlegSup = {aleg_session_sup, {aleg_session_sup, start_link, []}, 
+	      permanent, 2000, supervisor, [aleg_session_sup]},
+    CFexeSup = {cf_sup, {cf_exe_sup, start_link, []}, 
+	      permanent, 2000, supervisor, [cf_exe_sup]},
+    Children = [FsWorker, AlegSup, CFexeSup],
     RestartStrategy = {one_for_one, 10, 10},
     {ok, {RestartStrategy, Children}}.
 

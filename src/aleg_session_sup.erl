@@ -1,12 +1,12 @@
 %%%-------------------------------------------------------------------
-%%% @author Luis F Urrea <lfurrea@mindcoder.simplecs.sa>
+%%% @author Luis F Urrea <lfurrea@simplecs.net>
 %%% @copyright (C) 2012, Luis F Urrea
 %%% @doc
 %%%
 %%% @end
-%%% Created :  6 Nov 2012 by Luis F Urrea <lfurrea@mindcoder.simplecs.sa>
+%%% Created :  6 Nov 2012 by Luis F Urrea <lfurrea@simplecs.net>
 %%%-------------------------------------------------------------------
--module(fs_outbound_extn_sup).
+-module(aleg_session_sup).
 
 -behaviour(supervisor).
 
@@ -17,6 +17,13 @@
 -export([init/1]).
 
 -define(SERVER, ?MODULE).
+
+-type startlink_err() :: {'already_started', pid()} | 'shutdown' | term().
+-type startlink_ret() :: {'ok', pid()} | ignore | {'error', startlink_err()}.
+-type sup_child_spec() :: supervisor:child_spec().
+-type sup_child_specs() :: [sup_child_spec()] | [].
+-type sup_start_flags() :: {supervisor:strategy(), non_neg_integer(), non_neg_integer()}.
+-type sup_init_ret() :: ignore | {'ok', {sup_start_flags(), sup_child_specs()}}.
 
 %%%===================================================================
 %%% API functions
@@ -29,6 +36,9 @@
 %% @spec start_link() -> {ok, Pid} | ignore | {error, Error}
 %% @end
 %%--------------------------------------------------------------------
+
+-spec start_link() -> startlink_ret().
+
 start_link() ->
     supervisor:start_link({local, ?SERVER}, ?MODULE, []).
 
@@ -49,11 +59,21 @@ start_link() ->
 %%                     {error, Reason}
 %% @end
 %%--------------------------------------------------------------------
+
+-spec init(Args) -> sup_init_ret() when
+      Args :: [].
+
 init([]) ->
-    {ok, {{simple_one_for_one, 0, 1},
+    RestartStrategy = simple_one_for_one,
+    MaxRestarts = 0,
+    MaxSecondsBetweenRestarts = 1,
+
+    SupFlags = {RestartStrategy, MaxRestarts, MaxSecondsBetweenRestarts},
+
+    {ok, { SupFlags,
           [
-           {outbound_extn_controller, {fs_outbound_extn_controller, start_link, []},
-            temporary, 2000, worker, [fs_outbound_extn_controller]}
+           {aleg_session, {aleg_session, start_link, []},
+            temporary, 2000, worker, [aleg_session]}
           ]}}.
 
 %%%===================================================================

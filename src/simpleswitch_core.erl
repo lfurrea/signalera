@@ -1,17 +1,17 @@
 %%%-------------------------------------------------------------------
-%%% @author Luis F Urrea <lfurrea@mindcoder.simplecs.sa>
+%%% @author Luis F Urrea <lfurrea@.simplecs.net>
 %%% @copyright (C) 2012, Luis F Urrea
 %%% @doc
 %%%
 %%% @end
-%%% Created : 30 Oct 2012 by Luis F Urrea <lfurrea@mindcoder.simplecs.sa>
+%%% Created :  6 Nov 2012 by Luis F Urrea <lfurrea@.simplecs.net>
 %%%-------------------------------------------------------------------
--module(fs_outbound_extn_controller).
+-module(simpleswitch_core).
 
 -behaviour(gen_server).
 
 %% API
--export([start_link/2]).
+-export([start_link/0, deallocate_me/2]).
 
 %% gen_server callbacks
 -export([init/1, handle_call/3, handle_cast/2, handle_info/2,
@@ -19,12 +19,10 @@
 
 -define(SERVER, ?MODULE). 
 
--record(state, {
-	 cnode :: atom(),
-	 number :: string(),
-	 exten :: string(),
-	 uuid :: string(),
-	 controller_pid :: pid()}).
+-record(state, {dict}).
+
+-type startlink_err() :: {'already_started', pid()} |'shutdown' | term().
+-type startlink_ret() :: {'ok', pid()} | 'ignore' | {'error', startlink_err()}.
 
 %%%===================================================================
 %%% API
@@ -37,8 +35,11 @@
 %% @spec start_link() -> {ok, Pid} | ignore | {error, Error}
 %% @end
 %%--------------------------------------------------------------------
-start_link(UUID, ControllerPid) ->
-    gen_server:start_link(?MODULE, [UUID, ControllerPid], []).
+
+-spec start_link() -> startlink_ret().
+
+start_link() ->
+    gen_server:start_link({local, ?SERVER}, ?MODULE, [], []).
 
 %%%===================================================================
 %%% gen_server callbacks
@@ -55,9 +56,26 @@ start_link(UUID, ControllerPid) ->
 %%                     {stop, Reason}
 %% @end
 %%--------------------------------------------------------------------
-init([UUID, ControllerPid]) ->
-    State = #state{cnode = freeswitch@mindcoder, uuid = UUID, controller_pid = ControllerPid},
-    {ok, State}.
+
+-spec init([]) -> {ok, #state{}}.
+
+init([]) ->
+    {ok, #state{dict = dict:new()}}.
+
+%%--------------------------------------------------------------------
+%% @public
+%% @doc
+%% A session object is an abstraction  that  provides an API to be able
+%% to interact with the channel. This is called when there is nothing 
+%% else to do with this session and the process needs to be shutdown.
+%% @end
+%%--------------------------------------------------------------------
+
+-spec deallocate_me(string(), pid()) -> ok.
+
+deallocate_me(UUID, Pid) ->
+    gen_server:cast(?SERVER, {deallocate_me, UUID, Pid}).
+
 
 %%--------------------------------------------------------------------
 %% @private
@@ -74,10 +92,10 @@ init([UUID, ControllerPid]) ->
 %% @end
 %%--------------------------------------------------------------------
 
+-spec handle_call(term(), {pid(), _}, #state{}) -> {reply, not_implemented, #state{}}.
+
 handle_call(_Request, _From, State) ->
-    error_logger:info_msg("Got ~p",[_Request]),
-    Reply = ok,
-    {reply, Reply, State}.
+    {reply, not_implemented, State}.
 
 %%--------------------------------------------------------------------
 %% @private
@@ -89,9 +107,15 @@ handle_call(_Request, _From, State) ->
 %%                                  {stop, Reason, State}
 %% @end
 %%--------------------------------------------------------------------
-handle_cast(_Msg, State) ->
-    error_logger:info_msg("Got ~p",[_Msg]),
-    {noreply, State}.
+
+-spec handle_cast({deallocate_me, string(), pid()}, #state{}) -> {noreply, #state{}}.
+
+handle_cast({deallocate_me, UUID, _Pid}, #state{dict = Uuid2Pid} = State) ->
+    NewDict = dict:erase(UUID, Uuid2Pid),
+%%    supervisor:terminate_child(aleg_session_sup, Pid),
+    error_logger:info_msg("Successfully deallocated ~p", [UUID]),
+    {noreply, State#state{dict=NewDict}}.
+
 
 %%--------------------------------------------------------------------
 %% @private
@@ -103,37 +127,14 @@ handle_cast(_Msg, State) ->
 %%                                   {stop, Reason, State}
 %% @end
 %%--------------------------------------------------------------------
-handle_info({call, {event, [UUID | Rest]}}, #state{cnode = Node} = State) ->
-    error_logger:info_msg("Got initial call event ~p",[UUID]),
-    Number = proplists:get_value("Channel-Destination-Number", Rest),
-    NewState = State#state{number= Number},
-    {noreply, NewState};
 
-handle_info({call_event, {event, [UUID | Rest]}}, #state{cnode = Node, number = Number, uuid = UUID} = State) ->
-    Event = proplists:get_value("Event-Name", Rest),
-    case Event of 
-	"CHANNEL_PARK" ->
-	    error_logger:info_msg("A-leg is PARKED: ~p, now we will try the our call flow to number ~p",[UUID, Number]),
-	    freeswitch:sendmsg(Node, UUID,
-	    		       [{"call-command", "execute"},
-	    		       {"execute-app-name", "bridge"},
-	    		       {"execute-app-arg", "user/" ++ Number}]),
-	    {noreply, State};
-	"CHANNEL_BRIDGE" ->
-	    error_logger:info_msg("We bridged to a B-leg ~p",[UUID]),
-	    {noreply, State};
-	_ ->
-	    error_logger:info_msg("Got fucked ~p",[Event]),
-	    {noreply, State}
-    end;
-handle_info(call_hangup, #state{uuid = UUID, controller_pid = ControllerPid} = State)->
-    error_logger:info_msg("Got call_hangup event for: ~p, will proceed to deallocate A-leg", [UUID]),
-    ControllerPid ! {deallocate_me, UUID, self()},
-    {stop, normal, State};
-handle_info(_Info, State) ->
-    error_logger:info_msg("Got ~p",[_Info]),
-    {noreply, State}.
+-spec handle_info({get_pid, string(), reference(), pid()}, #state{}) -> {noreply, #state{}}.
 
+handle_info({get_pid, UUID, Ref, From}, State) ->
+    {SessionPid, NewState} = find_or_create_session(UUID, State),
+    From ! {Ref, SessionPid},
+    error_logger:info_msg("Sending events to ~p", [SessionPid]),
+    {noreply, NewState}.
 
 %%--------------------------------------------------------------------
 %% @private
@@ -146,6 +147,9 @@ handle_info(_Info, State) ->
 %% @spec terminate(Reason, State) -> void()
 %% @end
 %%--------------------------------------------------------------------
+
+-spec terminate(term(), #state{}) -> ok.
+
 terminate(_Reason, _State) ->
     ok.
 
@@ -157,9 +161,34 @@ terminate(_Reason, _State) ->
 %% @spec code_change(OldVsn, State, Extra) -> {ok, NewState}
 %% @end
 %%--------------------------------------------------------------------
+
+-spec code_change(term(), #state{}, term()) -> {ok, #state{}}.
+
 code_change(_OldVsn, State, _Extra) ->
     {ok, State}.
 
 %%%===================================================================
 %%% Internal functions
 %%%===================================================================
+
+%%--------------------------------------------------------------------
+%% @doc
+%% Called in order to get a handle on an existing session object by 
+%% uuid, or when a new one is required.
+%% TODO: Return value when there is an issue starting a session ob.
+%% @end
+%%--------------------------------------------------------------------
+
+
+-spec find_or_create_session(string(), #state{}) -> {pid(), #state{}}.
+
+find_or_create_session(UUID, #state{dict = Uuid2Pid} = State) ->
+    case dict:find(UUID, Uuid2Pid) of
+	{ok, Pid} ->
+	    {Pid, State};
+	_ ->
+	    {ok, AlegPid} = supervisor:start_child(aleg_session_sup,[UUID, self()]),
+	    {AlegPid, State#state{
+			dict = dict:store(UUID, AlegPid, Uuid2Pid)
+		       }}
+    end.

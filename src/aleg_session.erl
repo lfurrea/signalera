@@ -1,17 +1,17 @@
 %%%-------------------------------------------------------------------
-%%% @author Luis F Urrea <lfurrea@mindcoder.simplecs.sa>
+%%% @author Luis F Urrea <lfurrea@simplecs.net>
 %%% @copyright (C) 2012, Luis F Urrea
 %%% @doc
 %%%
 %%% @end
-%%% Created :  6 Nov 2012 by Luis F Urrea <lfurrea@mindcoder.simplecs.sa>
+%%% Created : 30 Oct 2012 by Luis F Urrea <lfurrea@simplecs.net>
 %%%-------------------------------------------------------------------
--module(fs_outbound_controller).
+-module(aleg_session).
 
 -behaviour(gen_server).
 
 %% API
--export([start_link/0]).
+-export([start_link/2]).
 
 %% gen_server callbacks
 -export([init/1, handle_call/3, handle_cast/2, handle_info/2,
@@ -19,7 +19,10 @@
 
 -define(SERVER, ?MODULE). 
 
--record(state, {dict}).
+-include("callflow.hrl").
+
+-type startlink_err() :: {'already_started', pid()} |'shutdown' | term().
+-type startlink_ret() :: {'ok', pid()} | 'ignore' | {'error', startlink_err()}.
 
 %%%===================================================================
 %%% API
@@ -32,8 +35,18 @@
 %% @spec start_link() -> {ok, Pid} | ignore | {error, Error}
 %% @end
 %%--------------------------------------------------------------------
-start_link() ->
-    gen_server:start_link({local, ?SERVER}, ?MODULE, [], []).
+
+-spec start_link(string(), pid()) -> startlink_ret().
+
+start_link(UUID, ControllerPid) ->
+    gen_server:start_link(?MODULE, [UUID, ControllerPid], []).
+
+%%--------------------------------------------------------------------
+%% @doc
+%% Hangup this channel and destroy session?
+%% @end
+%%--------------------------------------------------------------------
+
 
 %%%===================================================================
 %%% gen_server callbacks
@@ -50,8 +63,12 @@ start_link() ->
 %%                     {stop, Reason}
 %% @end
 %%--------------------------------------------------------------------
-init([]) ->
-    {ok, #state{dict = dict:new()}}.
+
+-spec init(list()) -> {ok, #cf_call{}}.
+
+init([UUID, ControllerPid]) ->
+    State = #cf_call{aleg_uuid = UUID, controller_pid = ControllerPid},
+    {ok, State}.
 
 %%--------------------------------------------------------------------
 %% @private
@@ -67,8 +84,11 @@ init([]) ->
 %%                                   {stop, Reason, State}
 %% @end
 %%--------------------------------------------------------------------
-handle_call({reply, Ref, ExtnPid}, _From, State) ->
-    Reply = {Ref, ExtnPid},
+
+-spec handle_call(term(), {pid(), _}, #cf_call{}) -> {reply, not_implemented, #cf_call{}}. 
+
+handle_call(_Request, _From, State) ->
+    Reply = not_implemented,
     {reply, Reply, State}.
 
 %%--------------------------------------------------------------------
@@ -81,6 +101,9 @@ handle_call({reply, Ref, ExtnPid}, _From, State) ->
 %%                                  {stop, Reason, State}
 %% @end
 %%--------------------------------------------------------------------
+
+-spec handle_cast(term(), #cf_call{}) -> {noreply, #cf_call{}}.
+
 handle_cast(_Msg, State) ->
     {noreply, State}.
 
@@ -94,16 +117,44 @@ handle_cast(_Msg, State) ->
 %%                                   {stop, Reason, State}
 %% @end
 %%--------------------------------------------------------------------
-handle_info({get_pid, UUID, Ref, From}, State) ->
-    {ExtnPid, NewState} = find_or_create_extn(UUID, State),
-    From ! {Ref, ExtnPid},
+
+-spec handle_info({Msg, {event, list()}}, #cf_call{}) -> {noreply, #cf_call{}} when
+      Msg :: call | call_event;
+		 (call_hangup, #cf_call{}) -> {stop, normal, #cf_call{}}.
+
+handle_info({call, {event, [UUID | Rest]}}, #cf_call{} = Call) ->
+    error_logger:info_msg("Got initial call event ~p",[UUID]),
+    DestNumber = proplists:get_value("Channel-Destination-Number", Rest),
+    NewState = Call#cf_call{destination_number= DestNumber},
     {noreply, NewState};
 
-handle_info({deallocate_me, UUID, Pid}, #state{dict = Uuid2Pid} = State) ->
-    NewDict = dict:erase(UUID, Uuid2Pid),
-    supervisor:terminate_child(fs_outbound_extn_sup, Pid),
-    error_logger:info_msg("Successfully deallocated ~p", [UUID]),
-    {noreply, State#state{dict=NewDict}}.
+handle_info({call_event, {event, [UUID | Rest]}}, #cf_call{destination_number = DestNumber, aleg_uuid = UUID} = Call) ->
+    Event = proplists:get_value("Event-Name", Rest),
+    ChannelState = proplists:get_value("Channel-State", Rest),
+    case Event of
+	"CHANNEL_PARK" ->
+	    error_logger:info_msg("A-leg is PARKED: ~p, now we will execute our call flow to number ~p",[UUID, DestNumber]),
+	    Flow = [cf_device, cf_voicemail],
+	    supervisor:start_child(cf_exe_sup, [Call, Flow]),
+	    {noreply, Call};
+	"CHANNEL_BRIDGE" ->
+	    error_logger:info_msg("We bridged to a B-leg ~p",[UUID]),
+	    {noreply, Call};
+	"CHANNEL_STATE" ->
+	    error_logger:info_msg("Aleg call state ~p",[ChannelState]),
+	    {noreply, Call};
+	_ ->
+	    error_logger:info_msg("Got fucked ~p",[Event]),
+	    {noreply, Call}
+    end;
+handle_info(call_hangup, #cf_call{aleg_uuid = UUID} = Call)->
+    error_logger:info_msg("Got call_hangup event for: ~p, will proceed to deallocate A-leg", [UUID]),
+    simpleswitch_core:deallocate_me(UUID, self()),
+    {noreply, Call};
+handle_info(_Info, State) ->
+    error_logger:info_msg("Got ~p",[_Info]),
+    {noreply, State}.
+
 
 %%--------------------------------------------------------------------
 %% @private
@@ -116,8 +167,11 @@ handle_info({deallocate_me, UUID, Pid}, #state{dict = Uuid2Pid} = State) ->
 %% @spec terminate(Reason, State) -> void()
 %% @end
 %%--------------------------------------------------------------------
+
+-spec terminate(term(), #cf_call{}) -> normal.
+
 terminate(_Reason, _State) ->
-    ok.
+    normal.
 
 %%--------------------------------------------------------------------
 %% @private
@@ -127,21 +181,12 @@ terminate(_Reason, _State) ->
 %% @spec code_change(OldVsn, State, Extra) -> {ok, NewState}
 %% @end
 %%--------------------------------------------------------------------
+
+-spec code_change(term(), #cf_call{}, term()) -> {ok, #cf_call{}}.
+
 code_change(_OldVsn, State, _Extra) ->
     {ok, State}.
 
 %%%===================================================================
 %%% Internal functions
 %%%===================================================================
-
-find_or_create_extn(UUID, #state{dict = Uuid2Pid} = State) ->
-    case dict:find(UUID, Uuid2Pid) of
-
-	{ok, Pid} ->
-	    {Pid, State};
-	_ ->
-	    {ok, AlegPid} = supervisor:start_child(fs_outbound_extn_sup,[UUID, self()]),
-	    {AlegPid, State#state{
-			dict = dict:store(UUID, AlegPid, Uuid2Pid)
-		       }}
-    end.
